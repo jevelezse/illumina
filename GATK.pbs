@@ -1,0 +1,278 @@
+################################
+########## Heading #############
+# This tells the terminal to use \emph{bash as the interpreter
+#!/bin/bash
+# This is a comment. The heading of the script must include
+# instructions to the scheduler. The arguments begin with #PBS and
+# the options
+
+# First we need to stablish the name of the queue we will utilize.
+# According to the queue charts, assigns 8 processors,
+# 64GB of RAM and a walltime of one week
+#PBS -q batch
+# In case you need to specify requirements you can also use this limits
+# to set the exact amount of resources to be used. For example 6 processors
+# distributed in a single node, 50GB of RAM and 3 days of computing time.
+#PBS -l nodes=1:ppn=8
+#PBS -l mem=50gb
+#PBS -l walltime=72:00:00
+
+
+# This remaining directives specify the shell to use, our email and notification
+# settings as well as the name for our job.
+#PBS -S /bin/bash
+#PBS -M j.velez248@uniandes.edu.co
+#PBS -m abe
+#PBS -N GATK_completo
+
+hapmap=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/hapmap_3.3.hg19.vcf
+omni=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/1000G_omni2.5.hg19.vcf
+g1000snps=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/1000G_phase1.snps.high_confidence.hg19.sites.vcf
+dbsnp=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/dbsnp_137.hg19.vcf
+mills=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/Mills_and_1000G_gold_standard.indels.hg19.vcf
+g1000indels=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/1000G_phase1.indels.hg19.vcf
+genoma_ref=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/WholeGenomeFasta/genome.fa
+nueva_carpeta=/hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/
+
+mv $nueva_carpeta/fastq/38024_S2_L001_R1_001.fastq.gz   /hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/38024
+
+mv $nueva_carpeta/fastq/38024_S2_L001_R2_001.fastq.gz  /hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/38024
+
+gzip -d $nueva_carpeta/38024/38024_S2_L001_R1_001.fastq.gz
+gzip -d $nueva_carpeta/38024/38024_S2_L001_R2_001.fastq.gz
+
+fastqc $nueva_carpeta/38024/38024_S2_L001_R1_001.fastq
+fastqc $nueva_carpeta/38024/38024_S2_L001_R2_001.fastq
+
+#BWA
+
+bwa mem -t8 -M $genoma_ref  $nueva_carpeta/38024/38024_S2_L001_R1_001.fastq $nueva_carpeta/38024/38024_S2_L001_R2_001.fastq > $nueva_carpeta/38024/38024.sam
+
+#picard1
+module load gatk/3.5
+module load R
+
+java -jar `which SortSam.jar` INPUT=$nueva_carpeta/38024/38024.sam OUTPUT=$nueva_carpeta/38024/sorted.bam SORT_ORDER=coordinate TMP_DIR=/state/partition1/j.velez248 
+
+module load picardtools/1.140
+
+######################## PICARD AddOrReplaceReadGroups #################
+
+java -jar `which AddOrReplaceReadGroups.jar` \
+	I=$nueva_carpeta/38024/sorted.bam/ \
+	O=$nueva_carpeta/38024/sorted.rg.bam \
+	SM= prueba \
+	VALIDATION_STRINGENCY=LENIENT \
+	ID=1 \
+	LB=unknown \
+	PL=illumina \
+	PU=1234 \
+        TMP_DIR=/state/partition1/j.velez248
+
+######################## PICARD MarkDuplicates #########################
+java -Xmx26g -jar `which MarkDuplicates.jar` \
+	I=$nueva_carpeta/38024/sorted.rg.bam \
+	O=$nueva_carpeta/38024/sorted.rg.md.bam \
+	M=$nueva_carpeta/38024/sorted.rg.md.metrics \
+	ASSUME_SORTED=true \
+	VALIDATION_STRINGENCY=LENIENT \
+        TMP_DIR=/state/partition1/j.velez248
+
+######################## ANOTHER SAMTOOLS INDEX ########################
+
+samtools index $nueva_carpeta/38024/sorted.rg.md.bam
+
+##GATK_preprocesamiento
+module load gatk/3.5
+
+######################## GATK RealignerTargetCreator ###################
+java -Xmx12g -jar `which GenomeAnalysisTK.jar` \
+    -T RealignerTargetCreator -nt 8 \
+    -R $genoma_ref  \
+    -I $nueva_carpeta/38024/sorted.rg.md.bam \
+    -o $nueva_carpeta/38024/sorted.rg.md.intervals \
+    -L /hpcfs/home/ciencias/biologia/cursos/bcom4103/j.velez248/omics/hg19/truseq_exome_targeted_regions.hg19.bed \
+    -known $mills \
+    -known $dbsnp \
+    -known $g1000indels \
+        
+module load gatk/3.5    
+######################## GATK IndelRealigner ###########################
+
+java -Xmx12g -jar `which GenomeAnalysisTK.jar` \
+    -T IndelRealigner \
+    -R $genoma_ref \
+    -I $nueva_carpeta/38024/sorted.rg.md.bam \
+    -targetIntervals $nueva_carpeta/38024/sorted.rg.md.intervals \
+    -o $nueva_carpeta/38024/sorted.rg.md.ir.bam \
+    --filter_bases_not_stored \
+    -known $mills \
+    -known $dbsnp \
+    -known $g1000indels
+
+######################## ANOTHER SAMTOOLS INDEX ########################
+
+samtools index $nueva_carpeta/38024/sorted.rg.md.ir.bam
+
+module load gatk/3.5  
+######################## GATK BaseRecalibrator #########################
+java -Xmx12g -jar `which GenomeAnalysisTK.jar` \
+    -T BaseRecalibrator -nct 8 \
+    -R $genoma_ref\
+    -I $nueva_carpeta/38024/sorted.rg.md.ir.bam \
+    -o $nueva_carpeta/38024/sorted.rg.md.ir.grp \
+    -knownSites $mills \
+    -knownSites $dbsnp \
+    -knownSites $g1000indels
+
+module load gatk/3.5  
+######################## GATK PrintReads ###############################
+java -Xmx12g -jar `which GenomeAnalysisTK.jar` \
+    -T PrintReads -nct 8 \
+    -R $genoma_ref \
+    -I $nueva_carpeta/38024/sorted.rg.md.ir.bam \
+    -BQSR $nueva_carpeta/38024/sorted.rg.md.ir.grp \
+    -o $nueva_carpeta/38024/38024_ready.bam
+
+
+######################## ANOTHER SAMTOOLS INDEX ########################
+
+samtools index $nueva_carpeta/38024/38024_ready.bam
+
+module load gatk/3.5
+
+######################## GATK HaplotypeCaller ###############################
+java -Xmx26g -Djava.io.tmpdir=/state/partition1/j.velez248 \
+    -jar `which GenomeAnalysisTK.jar` \
+    -T HaplotypeCaller \
+    -nct 8 \
+    -R $genoma_ref \
+    --dbsnp $dbsnp \
+    -I $nueva_carpeta/38024/38024_ready.bam \
+    -o $nueva_carpeta/38024/raw.vcf
+
+java -Xmx15g -jar `which GenomeAnalysisTK.jar` \
+  -nt 15 \
+  -R $genoma_ref  \
+  -T VariantRecalibrator \
+  --maxGaussians 4 \
+  -resource:hapmap,known=false,training=true,truth=true,prior=15.0 $hapmap \
+  -resource:omni,known=false,training=true,truth=true,prior=12.0 $omni \
+  -resource:1000G,known=false,training=true,truth=false,prior=10.0 $g1000snps \
+  -resource:dbsnp,known=true,training=false,truth=false,prior=2.0 $dbsnp \
+  -an QD -an MQRankSum -an ReadPosRankSum -an FS -an DP \
+  -mode SNP \
+  -tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 90.0 \
+  -input $nueva_carpeta/38024/raw.vcf \
+  -recalFile $nueva_carpeta/38024/snp.recal.vcf \
+  -tranchesFile $nueva_carpeta/38024/snp.tranches \
+  -rscriptFile $nueva_carpeta/38024/snp.r \
+  --disable_auto_index_creation_and_locking_when_reading_rods
+
+# Create a Gaussian mixture model for INDELs
+java -Xmx15g -jar `which GenomeAnalysisTK.jar` \
+  -nt 15 \
+  -R $genoma_ref  \
+  -T VariantRecalibrator \
+  --maxGaussians 4 \
+  -resource:mills,known=true,training=true,truth=true,prior=12.0 $mills \
+  -resource:1000G,known=false,training=true,truth=false,prior=10.0 $g1000indels \
+  -an DP -an FS -an ReadPosRankSum -an MQRankSum \
+  -mode INDEL \
+  -tranche 100.0 -tranche 99.9 -tranche 99.0 -tranche 90.0 \
+  -input $nueva_carpeta/38024/raw.vcf \
+  -recalFile $nueva_carpeta/38024/indel.recal.vcf \
+  -tranchesFile $nueva_carpeta/38024/indel.tranches \
+  -rscriptFile $nueva_carpeta/38024/indel.r
+
+# Apply the model for SNPs
+java -Xmx15g -jar `which GenomeAnalysisTK.jar` \
+  -nt 15 \
+  -R $genoma_ref \
+  -T ApplyRecalibration \
+  -mode SNP \
+  --ts_filter_level 99.0 \
+  -input $nueva_carpeta/38024/raw.vcf \
+  -recalFile $nueva_carpeta/38024/snp.recal.vcf \
+  -tranchesFile $nueva_carpeta/38024/snp.tranches \
+  -o $nueva_carpeta/38024/snpAr.vcf
+
+# Apply the model for INDELS
+java -Xmx15g -jar `which GenomeAnalysisTK.jar` \
+  -nt 15 \
+  -R $genoma_ref \
+  -T ApplyRecalibration \
+  -mode indel \
+  --ts_filter_level 99.0 \
+  -input $nueva_carpeta/38024/snpAr.vcf \
+  -recalFile $nueva_carpeta/38024/indel.recal.vcf \
+  -tranchesFile $nueva_carpeta/38024/indel.tranches \
+  -o $nueva_carpeta/38024/snpAr.indelAr.vcf
+
+# Select the variants that passed the models
+java -Xmx15g -jar `which GenomeAnalysisTK.jar` \
+  -nt 15 \
+  -R $genoma_ref \
+  -T SelectVariants \
+  --excludeNonVariants \
+  --excludeFiltered \
+  --variant $nueva_carpeta/38024/snpAr.indelAr.vcf \
+  --out $nueva_carpeta/38024/38024.vqsr.vcf
+
+sh $nueva_carpeta/filtro.sh $nueva_carpeta/38024/38024.vqsr.vcf
+
+exit 0
+
+# Create a temporary directory locally on the node optimizes I/O performance
+TEMP_DIR=/state/partition1/$USER/$PBS_JOBNAME.${PBS_JOBID%.clustermaster.uniandes.edu.co}
+# Create the directory to store the computation output. For example
+# results inside the working directory.
+OUT_DIR=$PBS_O_WORKDIR/results
+
+# Creates a script log with the following information:
+SCRIPT_LOG=$PBS_O_WORKDIR/$PBS_JOBNAME.${PBS_JOBID%.clustermaster.uniandes.edu.co}.log
+touch $SCRIPT_LOG
+
+# Now store the information into the script log
+echo "Job started on" `hostname` `date` >> $SCRIPT_LOG
+echo "#####################################" >> $SCRIPT_LOG
+echo "PBS working directory: $PBS_O_WORKDIR" >> $SCRIPT_LOG
+echo "Current directory:" `pwd` >> $SCRIPT_LOG
+echo "Temporary directory: "$TEMP_DIR >> $SCRIPT_LOG
+echo "Output directory: "$OUT_DIR >> $SCRIPT_LOG
+echo "#####################################" >> $SCRIPT_LOG
+echo "User: $PBS_O_LOGNAME" >>$SCRIPT_LOG
+echo "Batch job started on $PBS_O_HOST" >>$SCRIPT_LOG
+echo "PBS job id: $PBS_JOBID" >>$SCRIPT_LOG
+echo "PBS job name: $PBS_JOBNAME" >>$SCRIPT_LOG
+echo "PBS environment: $PBS_ENVIRONMENT" >>$SCRIPT_LOG
+echo "#####################################" >> $SCRIPT_LOG
+echo  >>$SCRIPT_LOG
+echo "#####################################" >> $SCRIPT_LOG
+echo "#####################################" >> $SCRIPT_LOG
+echo "Full Environment:" >> $SCRIPT_LOG
+printenv >> $SCRIPT_LOG
+echo "#####################################" >> $SCRIPT_LOG
+echo  >> $SCRIPT_LOG
+echo "The Job is being executed on the following node:" >> $SCRIPT_LOG
+cat ${PBS_NODEFILE} >> $SCRIPT_LOG
+
+
+mkdir -p $TEMP_DIR
+mkdir -p $OUT_DIR
+cp -Rf $PBS_O_WORKDIR/important_file(s) $TEMP_DIR/.
+
+
+# We need to load the Gromacs v4.6.5 module
+#module load gromacs/4.6.5
+
+# execute gromacs using the configuration file config.txt
+cd $TEMP_DIR
+grompp config_file
+
+
+cd $OUT_DIR
+mv -f $TEMP_DIR ./
+# OPTIONAL (If you selected Body Part II): Output the finishing
+# date on the script log
+echo "Job Finished: " `date` >> $SCRIPT_LOG
